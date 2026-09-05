@@ -1,0 +1,49 @@
+{
+  "name": "@datum-cloud/opencode-plugins",
+  "version": "1.1.0",
+  "description": "Datum Cloud platform-engineering, GTM, and activity agents, skills, and commands for OpenCode",
+  "license": "MIT",
+  "author": {
+    "name": "Datum Cloud",
+    "email": "engineering@datumcloud.io",
+    "url": "https://github.com/datum-cloud"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/datum-labs/opencode-plugins"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "kubernetes",
+    "platform-engineering",
+    "go-to-market",
+    "activity",
+    "datum-cloud"
+  ],
+  "type": "module",
+  "main": "src/auto-validate.ts",
+  "exports": {
+    ".": "./src/auto-validate.ts"
+  },
+  "files": [
+    "src",
+    "agents",
+    "commands",
+    "skills",
+    "scripts",
+    "README.md",
+    "AGENTS.md",
+    "docs",
+    "postinstall.mjs"
+  ],
+  "scripts": {
+    "postinstall": "node postinstall.mjs --quiet",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

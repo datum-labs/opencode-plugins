@@ -1,0 +1,445 @@
+#!/usr/bin/env bash
+# PreToolUse gate for `gh pr|issue create|edit`.
+#
+# Measures the body being posted against the countable rules in the
+# pr-conventions skill. A create is measured against an empty baseline, so it
+# has to meet the bar outright. An edit is measured against the body already
+# posted and is refused only on dimensions where it scores worse, so a state
+# update to a post written before the convention, or by someone else, passes.
+# Style guidance that cannot be counted rides along as advisory context.
+#
+# The phrase table comes from the clear-writing skill, so the doc and the gate
+# cannot drift apart. An empty table is a refusal, never a pass.
+
+set -uo pipefail
+
+INPUT=$(cat)
+COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
+
+[[ "$COMMAND" =~ gh[[:space:]]+(pr|issue)[[:space:]]+(create|edit) ]] || exit 0
+KIND="${BASH_REMATCH[1]}"
+VERB="${BASH_REMATCH[2]}"
+
+DIMENSIONS=15
+
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+PHRASE_SOURCE="$PLUGIN_ROOT/skills/clear-writing/SKILL.md"
+
+ADVICE='Writing rules for this body (datum-platform:pr-conventions and clear-writing): answer what, who, when, where, how, why, and how much; cut every word carrying no fact; short word over long; verbs over -tion nouns; active over passive; numbers over adjectives; one idea per paragraph; short paragraphs whose length varies, rather than a dense block or a run of the same length; no "simply"/"just"/"easily"; no em dashes, no "load-bearing", no "gotchas", no "structural", no "why it matters" label, no "kept it honest"; none of the wordy phrases, Latin tags, or jargon in the clear-writing table; a colon only where a period will not do, and a semicolon only where a comma or a period will not; an ordered list rather than arrows for a sequence; say it once, so anything already in the linked issue gets linked, not restated. Depth belongs in a comment or the commit message.'
+
+emit() {
+  jq -n --arg ctx "$1" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      additionalContext: $ctx
+    }
+  }'
+}
+
+deny() {
+  jq -n --arg reason "$1" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $reason
+    }
+  }'
+}
+
+unquote() {
+  local v="$1"
+  v="${v%\"}"; v="${v#\"}"
+  v="${v%\'}"; v="${v#\'}"
+  printf '%s' "$v"
+}
+
+extract_body() {
+  local path
+  path=$(unquote "$(printf '%s' "$COMMAND" | sed -n -E 's/.*(--body-file|-F)[= ]+([^ ]+).*/\2/p' | head -1)")
+  if [ -n "$path" ] && [ "$path" != "-" ] && [ -r "$path" ]; then
+    cat "$path"
+    return
+  fi
+  printf '%s' "$COMMAND" | sed -n -E "s/.*(--body|-b)[= ]+'([^']*)'.*/\2/p" | head -1
+}
+
+load_phrases() {
+  LC_ALL=C awk -F'|' '
+/^## / { on = ($0 ~ /^## Phrases the gate refuses/); next }
+!on || $0 !~ /^\|/ { next }
+{
+  gsub(/^[ \t]+|[ \t]+$/, "", $2)
+  gsub(/^[ \t]+|[ \t]+$/, "", $3)
+}
+$2 == "Phrase" || $2 ~ /^-+$/ { next }
+{
+  n = split($2, forms, / \/ /)
+  for (i = 1; i <= n; i++) printf "%s\t%s\n", tolower(forms[i]), $3
+}
+' "$PHRASE_SOURCE"
+}
+
+measure() {
+  LC_ALL=C awk \
+    -v wide="$(printf '\xf0\x9f')" -v narrow="$(printf '\xe2')" \
+    -v emdash="$(printf '\xe2\x80\x94')" '
+FNR == NR {
+  t = index($0, "\t")
+  if (t == 0) next
+  np++
+  phrase[np] = substr($0, 1, t - 1)
+  fix[np] = substr($0, t + 1)
+  esc = ""
+  for (k = 1; k <= length(phrase[np]); k++) {
+    c = substr(phrase[np], k, 1)
+    esc = esc (c == "." ? "[.]" : c)
+  }
+  re[np] = "(^|[^a-z])" esc "([^a-z]|$)"
+  next
+}
+
+function flush_para(   i, n, wrapped) {
+  n = para_n
+  para_n = 0
+  if (n < 3) return
+  wrapped = 1
+  for (i = 1; i < n; i++) if (length(para[i]) < 55 || length(para[i]) > 92) wrapped = 0
+  if (wrapped) hardwrap = 1
+}
+
+/^```/ { fence = !fence; flush_para(); next }
+fence { next }
+
+/^#{1,6} / {
+  flush_para()
+  has_heading = 1
+  heading = tolower($0)
+  if (index($0, wide) || $0 ~ ("[" narrow "][\\x9a\\x9c\\x9d]")) emoji = 1
+  if (heading ~ /^#+[ ]+\**why it matters/) whymatters = 1
+  if (heading ~ /summary/) { section = "summary"; next }
+  if (heading ~ /test plan/) { section = "testplan"; next }
+  section = "other"
+  next
+}
+
+{
+  line = $0
+
+  if (tolower(line) ~ /(^|[^a-z])clos(e|es|ed)[ ]+#[0-9]/) closes = 1
+
+  if (line !~ /^[ \t]*>/) {
+    p = line
+    while ((i = index(p, emdash)) > 0) { emdashes++; p = substr(p, i + 3) }
+    if (tolower(line) ~ /load[ -]bearing/) loadbearing = 1
+    if (tolower(line) ~ /gotcha/) gotchas = 1
+
+    m = split(line, seg, "`")
+    prose = ""
+    for (j = 1; j <= m; j += 2) prose = prose " " seg[j]
+    prose = tolower(prose) " "
+    gsub(/https?:\/\/[^ )]*/, "", prose)
+    if (prose ~ /[^a-z]structural(ly)?[^a-z]/) structural = 1
+    if (prose ~ /why it matters[ ]*:/) whymatters = 1
+    if (prose ~ /^[ *]*why it matters[ *]*$/) whymatters = 1
+    if (prose ~ /(keep|keeps|kept|keeping) (it|them|us|you|things|everyone|everybody) honest/) honest = 1
+    if (prose ~ /that[^ ]*s a valid answer/ || prose ~ /that (is|was) a valid answer/) validanswer = 1
+    for (k = 1; k <= np; k++) {
+      cnt = gsub(re[k], "&", prose)
+      if (cnt == 0) continue
+      wordy += cnt
+      if (seen[k]) continue
+      seen[k] = 1
+      hits = hits (hits == "" ? "" : "|") "\"" phrase[k] "\" (write: " fix[k] ")"
+    }
+  }
+
+  n = split(line, part, "`")
+  for (i = 2; i <= n; i += 2) {
+    span = part[i]
+    if (span ~ /^https?:/) continue
+    if (span ~ /^\/[a-z0-9_~-]+(\/[a-z0-9_~{}-]+){0,2}$/) continue
+    if (span ~ /\//) code = 1
+    else if (span ~ /\.(go|ya?ml|json|md|sh|ts|tsx|js|py|tf)$/) code = 1
+    else if (span ~ /\(\)/) code = 1
+  }
+  if (line !~ /https?:/ && line ~ /(^|[ (])[A-Za-z0-9_.-]+\/[A-Za-z0-9_.\/-]+\.(go|ya?ml|json|md|sh|ts|tsx|js|py|tf)([ ),.]|$)/) code = 1
+
+  if (line ~ /^[ \t]*- \[[ xX]\]/) {
+    if (section == "testplan" || section == "") boxes++
+    else other_boxes++
+  }
+
+  if (section == "summary" || section == "") {
+    if (line ~ /[^ \t]/) {
+      summary = summary " " line
+      if (line ~ /^[ \t]*[-*] / && line !~ /[.!?][")]?[ \t]*$/) bullets++
+    }
+  }
+
+  if (line ~ /^[ \t]*$/ || line ~ /^[ \t]*([-*>|]|[0-9]+\.)/ || line ~ /^ {4}/) flush_para()
+  else para[++para_n] = line
+}
+
+END {
+  flush_para()
+  gsub(/\[[^]]*\]\([^)]*\)/, "LINK", summary)
+  gsub(/e\.g\.|i\.e\.|etc\.|vs\./, "", summary)
+  sentences = gsub(/[.!?]+([ \t]|$)/, "&", summary) + bullets
+  if (boxes == 0) boxes = other_boxes
+  if (!has_heading) sentences = 0
+
+  printf "sentences\t%d\n", sentences
+  printf "boxes\t%d\n", boxes
+  printf "code\t%d\n", (code ? 1 : 0)
+  printf "closes\t%d\n", (closes ? 1 : 0)
+  printf "emoji\t%d\n", (emoji ? 1 : 0)
+  printf "hardwrap\t%d\n", (hardwrap ? 1 : 0)
+  printf "emdashes\t%d\n", emdashes
+  printf "loadbearing\t%d\n", (loadbearing ? 1 : 0)
+  printf "gotchas\t%d\n", (gotchas ? 1 : 0)
+  printf "structural\t%d\n", (structural ? 1 : 0)
+  printf "whymatters\t%d\n", (whymatters ? 1 : 0)
+  printf "honest\t%d\n", (honest ? 1 : 0)
+  printf "validanswer\t%d\n", (validanswer ? 1 : 0)
+  printf "wordy\t%d\n", wordy
+  printf "wordyhits\t%s\n", hits
+}
+' "$PHRASES" -
+}
+
+compare() {
+  awk -F'\t' -v mode="$1" -v want="$DIMENSIONS" '
+function over(v, cap) { return (v > cap) ? v - cap : 0 }
+function worse(d, cap) { return over(cur[d], cap) > over(base[d], cap) }
+
+FNR == NR { base[$1] = $2; basen++; next }
+{ cur[$1] = $2; curn++ }
+
+END {
+  if (basen != want || curn != want) {
+    print "gate could not measure both bodies on all " want " dimensions" > "/dev/stderr"
+    exit 3
+  }
+
+  if (worse("sentences", 4)) {
+    if (mode == "edit")
+      printf "- Edit takes the summary from %d to %d sentences, against a cap of 4. Bring it back to the count you found.\n", base["sentences"], cur["sentences"]
+    else
+      printf "- Summary runs %d sentences against a cap of 4. Cut it to the problem, then what changes for users or operators.\n", cur["sentences"]
+  }
+  if (worse("boxes", 4)) {
+    if (mode == "edit")
+      printf "- Edit takes the test plan from %d to %d checkboxes, against a cap of 4.\n", base["boxes"], cur["boxes"]
+    else
+      printf "- Test plan has %d checkboxes against a cap of 4. Collapse build/lint/test rows into one and keep behavioral outcomes only.\n", cur["boxes"]
+  }
+  if (worse("code", 0)) {
+    if (mode == "edit")
+      print "- Edit adds file paths, identifiers, or tool invocations the posted body does not carry. Those belong in a comment or the commit message."
+    else
+      print "- Body names file paths, identifiers, or tool invocations. Those belong in a comment or the commit message, not the opening post."
+  }
+  if (worse("closes", 0)) {
+    if (mode == "edit")
+      print "- Edit adds a Closes keyword. Use Fixes or Resolves when the merge should close the issue, Related to when it should not."
+    else
+      print "- Body uses a Closes keyword. Use Fixes or Resolves when the merge should close the issue, Related to when it should not."
+  }
+  if (worse("emoji", 0)) {
+    if (mode == "edit")
+      print "- Edit adds an emoji heading. Use GitHub callout syntax for emphasis instead."
+    else
+      print "- Body uses an emoji heading. Use GitHub callout syntax for emphasis instead."
+  }
+  if (worse("hardwrap", 0)) {
+    if (mode == "edit")
+      print "- Edit adds hard-wrapped prose. GitHub reflows Markdown, so wrap only where syntax needs it."
+    else
+      print "- Body hard-wraps prose at a fixed column. GitHub reflows Markdown, so wrap only where syntax needs it."
+  }
+  if (worse("emdashes", 0)) {
+    if (mode == "edit")
+      printf "- Edit takes em dashes from %d to %d. Replace each new one with a period, a comma, or nothing.\n", base["emdashes"], cur["emdashes"]
+    else
+      printf "- Body uses %d em dash(es). Replace each with a period, a comma, or nothing.\n", cur["emdashes"]
+  }
+  if (worse("loadbearing", 0)) {
+    if (mode == "edit")
+      print "- Edit adds load-bearing. Name the dependency instead: what relies on the thing, and what breaks without it."
+    else
+      print "- Body says load-bearing. Name the dependency instead: what relies on the thing, and what breaks without it."
+  }
+  if (worse("gotchas", 0)) {
+    if (mode == "edit")
+      print "- Edit adds gotchas. Use caveats, watch-outs, constraints, or limitations, in headings too."
+    else
+      print "- Body says gotchas. Use caveats, watch-outs, constraints, or limitations, in headings too."
+  }
+  if (worse("structural", 0)) {
+    if (mode == "edit")
+      print "- Edit adds structural. Name the structure and what it forces, or drop the word. A term of art stays available inside code formatting."
+    else
+      print "- Body says structural. Name the structure and what it forces, or drop the word. A term of art stays available inside code formatting."
+  }
+  if (worse("whymatters", 0)) {
+    if (mode == "edit")
+      print "- Edit adds a why it matters label. Drop the label, whether it is a lead-in or a heading, and let the sentence under it stand."
+    else
+      print "- Body labels a passage as why it matters. Drop the label, whether it is a lead-in or a heading, and let the sentence under it stand."
+  }
+  if (worse("honest", 0)) {
+    if (mode == "edit")
+      print "- Edit adds something kept it honest. Say what the check compares and what it would have caught."
+    else
+      print "- Body says something kept it honest. Say what the check compares and what it would have caught."
+  }
+  if (worse("validanswer", 0)) {
+    if (mode == "edit")
+      print "- Edit ratifies an answer as valid. Say ok, or say nothing."
+    else
+      print "- Body ratifies an answer as valid. Say ok, or say nothing."
+  }
+  if (worse("wordy", 0)) {
+    nb = split(base["wordyhits"], bh, "|")
+    for (i = 1; i <= nb; i++) inbase[bh[i]] = 1
+    nc = split(cur["wordyhits"], ch, "|")
+    list = ""
+    for (i = 1; i <= nc; i++) if (!(ch[i] in inbase)) list = list (list == "" ? "" : "; ") ch[i]
+    if (list == "") { list = cur["wordyhits"]; gsub(/\|/, "; ", list) }
+    if (mode == "edit")
+      printf "- Edit adds wording the clear-writing skill refuses: %s.\n", list
+    else
+      printf "- Body uses %d instance(s) of wording the clear-writing skill refuses: %s.\n", cur["wordy"], list
+  }
+}
+' "$2" "$3"
+}
+
+scrubbed_command() {
+  printf '%s' "$COMMAND" | sed -E "s/'[^']*'/''/g; s/\"[^\"]*\"/\"\"/g"
+}
+
+target_selector() {
+  scrubbed_command | awk -v kind="$KIND" -v verb="$VERB" '
+{
+  n = split($0, t, /[ \t]+/)
+  for (i = 1; i <= n; i++)
+    if (t[i] == "gh" && t[i + 1] == kind && t[i + 2] == verb) { start = i + 3; break }
+  if (!start) exit 0
+  for (i = start; i <= n; i++) {
+    tok = t[i]
+    if (tok == "") continue
+    if (tok ~ /^(&&|\|\||;|\||>|>>|2>)$/) exit 0
+    if (tok ~ /^-/) {
+      if (tok ~ /=/) continue
+      if (tok ~ /^(--remove-milestone|--web|--draft|--help|-h)$/) continue
+      i++
+      continue
+    }
+    print tok
+    exit 0
+  }
+}
+'
+}
+
+run_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 10 "$@"
+  else
+    "$@"
+  fi
+}
+
+fetch_live_body() {
+  local selector repo workdir out
+  selector=$(target_selector)
+  repo=$(unquote "$(printf '%s' "$COMMAND" | sed -n -E 's/.*(--repo|-R)[= ]+([^ ]+).*/\2/p' | head -1)")
+  workdir=$(unquote "$(printf '%s' "$COMMAND" | sed -n -E 's/^[[:space:]]*cd[[:space:]]+([^ ]+)[[:space:]]*&&.*/\1/p' | head -1)")
+
+  [ "$KIND" = "issue" ] && [ -z "$selector" ] && return 1
+
+  local -a view
+  view=(gh "$KIND" view)
+  [ -n "$selector" ] && view+=("$selector")
+  [ -n "$repo" ] && view+=(--repo "$repo")
+  view+=(--json body)
+
+  out=$(
+    if [ -n "$workdir" ] && [ -d "$workdir" ]; then cd "$workdir" || exit 1; fi
+    run_bounded "${view[@]}" 2>/dev/null
+  ) || return 1
+
+  printf '%s' "$out" | jq -e -r '.body // ""' 2>/dev/null
+}
+
+BODY=$(extract_body)
+
+if [ -z "${BODY//[[:space:]]/}" ]; then
+  emit "$ADVICE"
+  exit 0
+fi
+
+WORK=$(mktemp -d) || { emit "$ADVICE"; exit 0; }
+trap 'rm -rf "$WORK"' EXIT
+
+PHRASES="$WORK/phrases"
+load_phrases > "$PHRASES" 2>/dev/null
+if [ ! -s "$PHRASES" ]; then
+  deny "The datum-platform gate could not load the phrase table from the clear-writing skill, so it refused rather than pass this body unchecked. Report the gate failure instead of retrying the same call."
+  exit 0
+fi
+
+printf '%s\n' "$BODY" | measure > "$WORK/cur"
+
+MODE="create"
+printf '' | measure > "$WORK/base"
+
+UNVERIFIED=""
+if [ "$VERB" = "edit" ]; then
+  if LIVE=$(fetch_live_body); then
+    MODE="edit"
+    printf '%s\n' "$LIVE" | measure > "$WORK/base"
+  else
+    UNVERIFIED="yes"
+  fi
+fi
+
+VIOLATIONS=$(compare "$MODE" "$WORK/base" "$WORK/cur" 2>/dev/null)
+RC=$?
+
+if [ "$RC" -ne 0 ]; then
+  deny "The datum-platform:pr-conventions gate could not measure this body, so it refused rather than pass it unchecked. Report the gate failure instead of retrying the same call."
+  exit 0
+fi
+
+if [ -n "$UNVERIFIED" ]; then
+  if [ -n "$VIOLATIONS" ]; then
+    emit "The posted body could not be read, so this edit was allowed through without comparing it. The body you are about to post misses the datum-platform:pr-conventions bar here:
+
+$VIOLATIONS
+Fix whichever of those your edit introduced. Leave alone anything that was already in the post. $ADVICE"
+  else
+    emit "$ADVICE"
+  fi
+  exit 0
+fi
+
+if [ -n "$VIOLATIONS" ]; then
+  if [ "$MODE" = "edit" ]; then
+    deny "This edit moves the posted body further from the datum-platform:pr-conventions bar:
+
+$VIOLATIONS
+An edit only has to leave the body no worse than it found it, so revise what the edit adds. Anything already in the post is not yours to fix. $ADVICE"
+  else
+    deny "This body misses the datum-platform:pr-conventions bar:
+
+$VIOLATIONS
+Revise it and post again. $ADVICE"
+  fi
+  exit 0
+fi
+
+emit "$ADVICE"
