@@ -11,6 +11,9 @@ The three source Claude Code plugins are merged flat into one collection:
 | **milo-activity** | Milo Activity service (audit logs, incidents, policy authoring) | 2 | 7 | 0 | — |
 | **total** (deduplicated) | | 13 | 42 | 9 | 1 |
 
+`work-tracking` (43rd skill) is written for this package and has **no upstream
+counterpart** in `claude-code-plugins`; keep it in mind when syncing upstream.
+
 ## Installation
 
 Add the package to your OpenCode config's `plugin` array:
@@ -42,7 +45,7 @@ opencode-plugins/
 │   └── pr-op-gate          # unchanged gh pr/issue body gate (invoked by the plugin)
 ├── agents/*.md             # 13 opencode subagents
 ├── commands/*.md           # 9 slash commands (namespaced: platform-*, gtm-*)
-├── skills/<name>/          # 42 skill dirs (SKILL.md + topic files + scripts/)
+├── skills/<name>/          # 43 skill dirs (SKILL.md + topic files + scripts/)
 ├── docs/
 │   ├── porting-guide.md    # claude→opencode mapping reference
 │   └── troubleshooting.md

@@ -33,7 +33,7 @@ opencode-plugins/
 │   └── pr-op-gate          # unchanged gh pr/issue body gate (invoked by the plugin)
 ├── agents/*.md             # 13 opencode subagents (filename = agent name)
 ├── commands/*.md           # 9 slash commands (namespaced: platform-*, gtm-*)
-├── skills/<name>/          # 42 skill dirs, each with SKILL.md + topic files + optional scripts/
+├── skills/<name>/          # 43 skill dirs, each with SKILL.md + topic files + optional scripts/
 ├── docs/
 │   ├── porting-guide.md    # claude→opencode field mapping reference
 │   └── troubleshooting.md

@@ -33,3 +33,22 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### Notes
 
 - The source `claude-code-plugins` was brought to `origin/main` (18 new commits) before porting this round.
+
+## [1.2.0] - 2026-10-29
+
+### Added
+
+- New **`work-tracking`** skill — how work is tracked across Datum's GitHub
+  Projects: an enhancements board per product (datum-cloud project 22,
+  milo-os project 2), monthly release milestones per product, and one
+  Engineering Plan (project 60) spanning both. Covers the intended
+  enhancement → execution join via sub-issues, repository visibility and the
+  private-repo reporting blind spot, eight traps that have produced wrong
+  reports, and a pre-publication checklist.
+
+### Notes
+
+- `work-tracking` is authored for this package and has **no upstream
+  counterpart** in `claude-code-plugins`. It is the first skill not sourced from
+  the three ported packs; expect a conflict marker on future upstream syncs and
+  keep this local skill rather than overwriting it.

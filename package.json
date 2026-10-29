@@ -1,6 +1,6 @@
 {
   "name": "@datum-cloud/opencode-plugins",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Datum Cloud platform-engineering, GTM, and activity agents, skills, and commands for OpenCode",
   "license": "MIT",
   "author": {
